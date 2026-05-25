@@ -8,6 +8,11 @@ Original file is located at
 """
 
 import streamlit as st
+
+st.title("My Gaming Chat App is Working!")
+st.write("If you can see this, the UI is rendering.")
+
+import streamlit as st
 from transformers import pipeline
 from huggingface_hub import InferenceClient
 import os
