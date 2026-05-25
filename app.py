@@ -1,135 +1,135 @@
+# app.py
+# Streamlit deployment for: Toxic Chat Detection (fine-tuned) + Humorous Rewriting (GPT2-XL)
+
 import streamlit as st
+from transformers import pipeline
 import torch
-import numpy as np
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
-from huggingface_hub import InferenceClient
 
-# ─────────────────────────────────────────────────────────────────────────
-# B&G IT Consulting – The Chat Purifier
-# Pipeline 1: Toxicity Detection (fine‑tuned model on HF)
-# Pipeline 2: Humorous Rewriting (GPT-2 XL via HF Inference API)
-# ─────────────────────────────────────────────────────────────────────────
-
-# ---------- Token management (Streamlit secrets or sidebar) ----------
-def get_hf_token() -> str:
-    """Return HF token from secrets (cloud) or sidebar (local)."""
-    # Try to load from Streamlit Cloud secrets first
-    try:
-        return st.secrets["HUGGINGFACE_TOKEN"]
-    except (KeyError, FileNotFoundError):
-        # Fallback to sidebar input
-        return st.session_state.get("hf_token", None)
-
-# ---------- Load toxicity classifier once ----------
-@st.cache_resource(show_spinner=False)
-def load_toxicity_classifier():
-    model_name = "RachelHu123/toxic-comment-finetuned"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForSequenceClassification.from_pretrained(
-        model_name,
-        num_labels=2,               # 0 = non‑toxic, 1 = toxic
-        ignore_mismatched_sizes=True
+# -------------------------------------------------------------------
+# 1. Cached model loaders (improves performance on Streamlit Cloud)
+# -------------------------------------------------------------------
+@st.cache_resource
+def load_toxicity_detector():
+    """
+    Pipeline 1: Fine-tuned toxic comment classifier.
+    Replace 'RachelHu123/toxic-comment-finetuned' with your own HF model ID.
+    """
+    return pipeline(
+        "text-classification",
+        model="RachelHu123/toxic-comment-finetuned",   # Your fine-tuned model
+        truncation=True,
+        device=0 if torch.cuda.is_available() else -1
     )
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model.to(device)
-    return tokenizer, model, device
 
-tokenizer, model, device = load_toxicity_classifier()
+@st.cache_resource
+def load_rewriter():
+    """
+    Pipeline 2: GPT2-XL (1.5B) for humorous rewriting.
+    Falls back to CPU if GPU not available – works on Streamlit Cloud.
+    """
+    return pipeline(
+        "text-generation",
+        model="gpt2-xl",
+        device_map="auto" if torch.cuda.is_available() else None,
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
+    )
 
-# ---------- Toxicity check ----------
-def is_toxic(text: str) -> tuple:
-    """Return (is_toxic_bool, confidence_float)."""
-    inputs = tokenizer(text, padding=True, truncation=True, return_tensors="pt").to(device)
-    with torch.no_grad():
-        logits = model(**inputs).logits
-    probs = torch.nn.functional.softmax(logits, dim=-1)
-    toxic_prob = probs[0, 1].item()
-    return toxic_prob >= 0.5, toxic_prob
+# -------------------------------------------------------------------
+# 2. Helper functions
+# -------------------------------------------------------------------
+def is_toxic(detector_output: dict) -> bool:
+    """
+    Convert pipeline output to boolean.
+    The fine-tuned model returns labels 'toxic' or 'non-toxic'.
+    """
+    return detector_output['label'].lower() == 'toxic'
 
-# ---------- Rewrite with GPT-2 XL (few‑shot) ----------
-def rewrite_message(original: str) -> str:
-    """Use GPT-2 XL with few‑shot examples to produce polite/humorous rewrite."""
-    token = get_hf_token()
-    if not token:
-        raise RuntimeError("Hugging Face token missing.")
-
-    client = InferenceClient(model="gpt2-xl", token=token)
-
-    # ⚠️ This few‑shot prompt replicates the pattern that produced your test outputs.
-    # Keep exactly the same separators and format.
+def rewrite_toxic_message(rewriter, toxic_text: str) -> str:
+    """
+    Use GPT2-XL to rewrite a toxic message into a humorous, polite compliment.
+    Prompt engineering ensures an elegant British butler style.
+    """
     prompt = (
-        "Toxic: bot lane is feeding non stop, gg close the game\n"
-        "Polite: botlane tactical pressure detected\n"
-        "###\n"
-        "Toxic: top gap is massive, our top is dog trash\n"
-        "Polite: toplane efficiency variance noticed\n"
-        "###\n"
-        "Toxic: why no baron? report this idiot team\n"
-        "Polite: baron control synchronization struggling\n"
-        "###\n"
-        f"Toxic: {original}\n"
-        "Polite:"
+        f"You are an elegant British butler. Rewrite the following toxic gaming chat "
+        f"into a hilarious, polite compliment. Do NOT keep any offensive words.\n"
+        f"Toxic chat: \"{toxic_text}\"\n"
+        f"Polite & funny rewrite:"
     )
-
-    response = client.text_generation(
+    # Generate with controlled length and creativity
+    output = rewriter(
         prompt,
-        max_new_tokens=30,
-        temperature=0.7,
-        stop_sequences=["###", "\n"]
+        max_new_tokens=40,
+        temperature=0.85,
+        do_sample=True,
+        top_p=0.95,
+        pad_token_id=rewriter.tokenizer.eos_token_id,
+        truncation=True
     )
-    # Remove any trailing newlines / extra spaces
-    return response.strip()
+    # Extract only the newly generated part (remove the original prompt)
+    generated = output[0]['generated_text'][len(prompt):].strip()
+    # Fallback if generation is empty
+    if not generated:
+        generated = "I do believe a spot of kindness would brighten this conversation, old chap."
+    return generated
 
-# ─────────────────────────────────────────────────────────────────────────
-# Streamlit UI
-# ─────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Chat Purifier", layout="centered")
-st.title("🎮 The Chat Purifier")
-st.caption("Pipeline 1 → Fine‑tuned Toxic‑BERT | Pipeline 2 → GPT‑2 XL Humorous Rewriter")
+# -------------------------------------------------------------------
+# 3. Streamlit UI
+# -------------------------------------------------------------------
+st.set_page_config(page_title="Toxic Chat Purifier", page_icon="🧹")
+st.title("🧹 Game Chat Purifier: Toxicity → Humor")
+st.markdown("Detects toxic messages and rewrites them into hilarious, polite compliments.")
 
-# --- Sidebar for token (only shown if not set in secrets) ---
-with st.sidebar:
-    st.header("⚙️ Hugging Face Token")
-    # If token is already in secrets, don't show the input
-    if "HUGGINGFACE_TOKEN" in st.secrets:
-        st.success("Token loaded from secrets ✅")
-    else:
-        token_input = st.text_input(
-            "Enter your HF token (required for GPT-2 XL):",
-            type="password",
-            key="hf_token"
-        )
-        if token_input:
-            st.success("Token set ✅")
-        else:
-            st.warning("⚠️ Token required for Pipeline 2 (rewriting).")
-        st.markdown("[Get your token here](https://huggingface.co/settings/tokens)")
+# Load models (spinner provides feedback during loading)
+with st.spinner("Loading AI models (first time may take 30-60 seconds)..."):
+    toxicity_model = load_toxicity_detector()
+    rewriter_model = load_rewriter()
+st.success("Models ready! ✅")
 
-# --- Main input area ---
-user_input = st.text_area("Enter a player chat message:", height=100)
+# User input
+user_input = st.text_area("Enter a chat message:", height=100, 
+                          placeholder="e.g., You're such a noob, uninstall the game!")
 
-if st.button("Purify"):
+if st.button("Purify Message", type="primary"):
     if not user_input.strip():
         st.warning("Please enter a message.")
     else:
-        # ---------- Pipeline 1 ----------
-        toxic_flag, confidence = is_toxic(user_input)
+        # ----- Pipeline 1: Toxicity Detection -----
+        with st.spinner("Analyzing message..."):
+            result = toxicity_model(user_input)[0]   # first (and only) prediction
+            toxic_flag = is_toxic(result)
 
-        if not toxic_flag:
-            st.success("✅ Message is non‑toxic. Delivered unchanged.")
-            st.write(f"> {user_input}")
+        # Display detection result
+        col1, col2 = st.columns(2)
+        col1.metric("Pipeline 1 Decision", "🚨 TOXIC" if toxic_flag else "✅ CLEAN")
+        col2.metric("Confidence", f"{result['score']:.2%}")
+
+        # ----- Pipeline 2: Rewriting (only if toxic) -----
+        if toxic_flag:
+            with st.spinner("Generating humorous rewrite (GPT2-XL)..."):
+                rewritten = rewrite_toxic_message(rewriter_model, user_input)
+            st.subheader("🧙‍♂️ Humorous Rewrite (sent to chat)")
+            st.success(rewritten)
+            st.caption("The original toxic message was **blocked** and replaced with the above.")
         else:
-            st.error(f"🚫 Toxicity detected (confidence: {confidence:.1%})")
+            st.subheader("✅ Message is clean")
+            st.info(user_input)
+            st.caption("No transformation applied – message passed through as is.")
 
-            # ---------- Pipeline 2 ----------
-            token = get_hf_token()
-            if not token:
-                st.error("Cannot rewrite: Hugging Face token missing. Please set it in the sidebar or secrets.")
-            else:
-                with st.spinner("GPT‑2 XL is polishing the message…"):
-                    try:
-                        clean_version = rewrite_message(user_input)
-                        st.success("✨ Toxic message neutralised and rewritten:")
-                        st.write(f"> {clean_version}")
-                    except Exception as e:
-                        st.error(f"Rewriting failed: {e}")
+# -------------------------------------------------------------------
+# 4. Sidebar with instructions & model info
+# -------------------------------------------------------------------
+st.sidebar.header("How it works")
+st.sidebar.markdown("""
+1. **Pipeline 1 (Fine-tuned model)**  
+   Detects toxic / offensive chat.  
+   Model: `RachelHu123/toxic-comment-finetuned` (based on `martin-ha/toxic-comment-model`)
+
+2. **Pipeline 2 (GPT2-XL 1.5B)**  
+   Rewrites toxic messages into polite, humorous compliments (British butler style).
+
+**Flow:**  
+User input → Toxicity classifier → if toxic → GPT2-XL rewrite → display funny message.  
+Normal messages are left untouched.
+""")
+st.sidebar.markdown("---")
+st.sidebar.markdown("**Deployment** – [Streamlit Cloud](https://streamlit.io/cloud) | [GitHub](https://github.com/)")
