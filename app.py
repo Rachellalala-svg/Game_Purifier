@@ -55,7 +55,6 @@ def rewrite_toxic_message(rewriter, toxic_text: str) -> str:
         f"Toxic chat: \"{toxic_text}\"\n"
         f"Polite & funny rewrite:"
     )
-    # Generate with controlled length and creativity
     output = rewriter(
         prompt,
         max_new_tokens=40,
@@ -63,13 +62,41 @@ def rewrite_toxic_message(rewriter, toxic_text: str) -> str:
         do_sample=True,
         top_p=0.95,
         pad_token_id=rewriter.tokenizer.eos_token_id,
-        truncation=True
+        truncation=True,
+        return_full_text=False          # 🆕 Only newly generated tokens
     )
-    # Extract only the newly generated part (remove the original prompt)
-    generated = output[0]['generated_text'][len(prompt):].strip()
-    # Fallback if generation is empty
+    raw = output[0]['generated_text'].strip()
+
+    # --- Robust cleaning ---
+    # 1. If the model still repeated the "Polite & funny rewrite:" marker, take the part after the last one.
+    marker = "Polite & funny rewrite:"
+    if marker in raw:
+        raw = raw.rsplit(marker, 1)[-1].strip()
+
+    # 2. Split into lines and keep only lines that do NOT look like a repeated prompt snippet.
+    lines = raw.split('\n')
+    clean_lines = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        # Discard lines that are part of a repeated dialogue structure
+        if line.lower().startswith("toxic chat:") or line.lower().startswith("polite & funny"):
+            continue
+        clean_lines.append(line)
+
+    # 3. If we have clean lines, join them; otherwise fallback to raw.
+    if clean_lines:
+        generated = ' '.join(clean_lines)
+    else:
+        generated = raw
+
+    # 4. Fallback if everything was filtered out
     if not generated:
         generated = "I do believe a spot of kindness would brighten this conversation, old chap."
+
+    # 5. Take only the first sentence (avoids multi‑paragraph rewrites)
+    generated = generated.split('.')[0].strip() + '.'
     return generated
 
 # -------------------------------------------------------------------
